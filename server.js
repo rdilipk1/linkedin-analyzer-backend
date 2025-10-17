@@ -12,38 +12,57 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // 3. Setup Middleware
-// Only allow requests from our frontend
 const corsOptions = {
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: process.env.FRONTEND_URL,
 };
-app.use(cors(corsOptions)); 
+if (!process.env.FRONTEND_URL) {
+    console.warn("WARNING: FRONTEND_URL environment variable not set. CORS may block requests.");
+} else {
+    console.log(`CORS configured for origin: ${process.env.FRONTEND_URL}`);
+}
+app.use(cors(corsOptions));
 app.use(express.json());
+
 
 // 4. Database Connection Pool
 let dbPool;
-try {
-  dbPool = mysql.createPool({
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
-  });
-  console.log("Database connection pool created.");
-} catch (error) {
-  console.error("Failed to create database pool:", error);
-}
+// Test database connection immediately on startup
+const initializeDatabase = async () => {
+    try {
+        console.log("Attempting to create database connection pool...");
+        dbPool = mysql.createPool({
+            host: process.env.DB_HOST,
+            user: process.env.DB_USER,
+            password: process.env.DB_PASSWORD,
+            database: process.env.DB_NAME,
+            waitForConnections: true,
+            connectionLimit: 10,
+            queueLimit: 0,
+            connectTimeout: 10000 // 10 seconds
+        });
+
+        // Try to get a connection to see if credentials are valid
+        const connection = await dbPool.getConnection();
+        console.log("Database connection pool created successfully and test connection acquired.");
+        connection.release(); // release the connection back to the pool
+        return true;
+    } catch (error) {
+        console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        console.error("!!! FATAL ERROR: Could not connect to the database. !!!");
+        console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        console.error("Error Details:", error.message);
+        console.error("Please check your DB_HOST, DB_USER, DB_PASSWORD, and DB_NAME environment variables on Render.");
+        console.error("Also, ensure your database server allows remote connections from Render's IP addresses.");
+        dbPool = null; // Set pool to null so we know it failed
+        return false;
+    }
+};
 
 // 5. Routes
 // ROUTE 1: Redirects the user to LinkedIn's authorization page
 app.get('/auth/linkedin', (req, res) => {
-  // IMPORTANT: Temporarily changed scope to the basic 'r_liteprofile' for testing the connection.
-  // This will allow the login to succeed without advanced permissions.
-  // The original scope was 'r_liteprofile r_member_social'.
+  console.log("Received request for /auth/linkedin");
   const scope = 'r_liteprofile';
-  // The redirect URI must point back to our deployed backend
   const redirectUri = `${process.env.BACKEND_URL}/auth/linkedin/callback`;
   const url = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&client_id=${process.env.LINKEDIN_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}`;
   res.redirect(url);
@@ -51,6 +70,12 @@ app.get('/auth/linkedin', (req, res) => {
 
 // ROUTE 2: LinkedIn redirects the user here after authorization
 app.get('/auth/linkedin/callback', async (req, res) => {
+  console.log("Received request for /auth/linkedin/callback");
+  if (!dbPool) {
+    console.error("Database not connected, cannot process callback.");
+    return res.status(500).send("Server error: Database connection failed.");
+  }
+  
   const { code } = req.query;
   const redirectUri = `${process.env.BACKEND_URL}/auth/linkedin/callback`;
 
@@ -80,7 +105,6 @@ app.get('/auth/linkedin/callback', async (req, res) => {
       [userId, access_token, expires_at, access_token, expires_at]
     );
 
-    // Redirect user back to the frontend settings page with a success indicator
     res.redirect(`${process.env.FRONTEND_URL}/settings?connected=true`);
 
   } catch (error) {
@@ -89,52 +113,44 @@ app.get('/auth/linkedin/callback', async (req, res) => {
   }
 });
 
-// ROUTE 3: The frontend calls this endpoint to get posts
+// Other API routes would go here...
 app.get('/api/posts', async (req, res) => {
+    console.log("Received request for /api/posts");
+    if (!dbPool) {
+        console.error("Database not connected, cannot fetch posts.");
+        return res.status(500).json({ message: 'Server error: Database connection failed.' });
+    }
+    // ... rest of the function ...
     try {
         const [rows] = await dbPool.execute('SELECT access_token FROM linkedin_auth WHERE user_id = ?', ['default_user']);
         if (rows.length === 0) {
             return res.status(401).json({ message: 'Not authenticated. Please connect to LinkedIn.' });
         }
         const accessToken = rows[0].access_token;
-
-        // Step 1: Get the authenticated user's profile to find their person URN
         const profileResponse = await axios.get('https://api.linkedin.com/v2/me', {
             headers: { 'Authorization': `Bearer ${accessToken}` }
         });
         const personUrn = `urn:li:person:${profileResponse.data.id}`;
-        
-        // NOTE: The following call will likely fail because we don't have the 'r_member_social' permission yet.
-        // This is expected. The goal of the temporary fix is to confirm the connection works.
         const linkedInApiUrl = `https://api.linkedin.com/rest/posts?author=${personUrn}&q=author&count=15`;
-
         const apiResponse = await axios.get(linkedInApiUrl, {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
-                'LinkedIn-Version': '202405' // Use a recent API version
+                'LinkedIn-Version': '202405'
             }
         });
-
-        // The data structure from LinkedIn's REST API is complex.
-        // This mapping will need to be adjusted based on the actual API response for personal posts.
-        const formattedPosts = apiResponse.data.elements.map(post => {
-            return {
-                id: post.id,
-                content: post.commentary || '',
-                imageUrl: post.content?.media?.source?.downloadUrl || `https://picsum.photos/800/400?random=${Math.floor(Math.random()*1000)}`,
-                impressions: 0, // Personal post APIs may not provide detailed insights
-                reactions: { likes: 0, celebrations: 0, loves: 0, insights: 0, funny: 0 },
-                comments: 0,
-                shares: 0,
-                date: new Date(post.createdAt).toISOString().split('T')[0],
-            };
-        });
-
+        const formattedPosts = apiResponse.data.elements.map(post => ({
+            id: post.id,
+            content: post.commentary || '',
+            imageUrl: post.content?.media?.source?.downloadUrl || `https://picsum.photos/800/400?random=${Math.floor(Math.random()*1000)}`,
+            impressions: 0,
+            reactions: { likes: 0, celebrations: 0, loves: 0, insights: 0, funny: 0 },
+            comments: 0,
+            shares: 0,
+            date: new Date(post.createdAt).toISOString().split('T')[0],
+        }));
         res.json(formattedPosts);
-
     } catch(error) {
         console.error('Error fetching posts from LinkedIn:', error.response ? error.response.data : error.message);
-        // Provide a more helpful error message to the frontend.
         if (error.response && error.response.status === 403) {
             return res.status(403).json({ message: 'Authentication successful, but you do not have permission to access post data. Please ensure your LinkedIn App has the "Community Management API" product approved.' });
         }
@@ -143,20 +159,37 @@ app.get('/api/posts', async (req, res) => {
 });
 
 app.get('/api/status', async (req, res) => {
-  try {
-    const [rows] = await dbPool.execute('SELECT 1 FROM linkedin_auth WHERE user_id = ?', ['default_user']);
-    if (rows.length > 0) {
-      res.json({ isConnected: true });
-    } else {
-      res.json({ isConnected: false });
+    console.log("Received request for /api/status");
+    if (!dbPool) {
+      return res.json({ isConnected: false });
     }
-  } catch(error) {
-    res.status(500).json({ isConnected: false, message: 'Could not check status.' });
-  }
+    try {
+      const [rows] = await dbPool.execute('SELECT 1 FROM linkedin_auth WHERE user_id = ?', ['default_user']);
+      res.json({ isConnected: rows.length > 0 });
+    } catch(error) {
+      console.error("Error in /api/status:", error.message);
+      res.status(500).json({ isConnected: false, message: 'Could not check status.' });
+    }
 });
 
 
 // 6. Start the server
-app.listen(PORT, () => {
-  console.log(`Backend server is running on http://localhost:${PORT}`);
-});
+const startServer = async () => {
+    const dbReady = await initializeDatabase();
+    if (dbReady) {
+        app.listen(PORT, () => {
+          console.log(`Backend server is running on http://localhost:${PORT}`);
+        });
+    } else {
+        console.error("SERVER NOT STARTED due to database connection failure.");
+        // We can create a fallback route to inform the user
+        app.get('*', (req, res) => {
+            res.status(503).send('Service Unavailable: Could not connect to the database.');
+        });
+        app.listen(PORT, () => {
+          console.log(`Backend server is running in a DEGRADED state on http://localhost:${PORT}`);
+        });
+    }
+};
+
+startServer();
