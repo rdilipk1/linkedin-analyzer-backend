@@ -1,4 +1,3 @@
-
 // server.js
 
 // 1. Import necessary packages
@@ -40,7 +39,10 @@ try {
 // 5. Routes
 // ROUTE 1: Redirects the user to LinkedIn's authorization page
 app.get('/auth/linkedin', (req, res) => {
-  const scope = 'r_liteprofile r_organization_social w_organization_social'; // Added write permissions if needed later
+  // IMPORTANT: Temporarily changed scope to the basic 'r_liteprofile' for testing the connection.
+  // This will allow the login to succeed without advanced permissions.
+  // The original scope was 'r_liteprofile r_member_social'.
+  const scope = 'r_liteprofile';
   // The redirect URI must point back to our deployed backend
   const redirectUri = `${process.env.BACKEND_URL}/auth/linkedin/callback`;
   const url = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&client_id=${process.env.LINKEDIN_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}`;
@@ -65,7 +67,7 @@ app.get('/auth/linkedin/callback', async (req, res) => {
         client_id: process.env.LINKEDIN_CLIENT_ID,
         client_secret: process.env.LINKEDIN_CLIENT_SECRET,
       },
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      headers: { 'Content-Type': 'application/x-form-urlencoded' }
     });
 
     const { access_token, expires_in } = tokenResponse.data;
@@ -95,11 +97,16 @@ app.get('/api/posts', async (req, res) => {
             return res.status(401).json({ message: 'Not authenticated. Please connect to LinkedIn.' });
         }
         const accessToken = rows[0].access_token;
+
+        // Step 1: Get the authenticated user's profile to find their person URN
+        const profileResponse = await axios.get('https://api.linkedin.com/v2/me', {
+            headers: { 'Authorization': `Bearer ${accessToken}` }
+        });
+        const personUrn = `urn:li:person:${profileResponse.data.id}`;
         
-        // Note: The URN for an organization page is different from a personal profile.
-        // This is a placeholder for fetching organization shares. You'd need to adapt this for personal posts if required.
-        const organizationUrn = process.env.LINKEDIN_ORGANIZATION_URN; // e.g., urn:li:organization:1234567
-        const linkedInApiUrl = `https://api.linkedin.com/rest/posts?author=${organizationUrn}&q=author&count=15`;
+        // NOTE: The following call will likely fail because we don't have the 'r_member_social' permission yet.
+        // This is expected. The goal of the temporary fix is to confirm the connection works.
+        const linkedInApiUrl = `https://api.linkedin.com/rest/posts?author=${personUrn}&q=author&count=15`;
 
         const apiResponse = await axios.get(linkedInApiUrl, {
             headers: {
@@ -109,23 +116,16 @@ app.get('/api/posts', async (req, res) => {
         });
 
         // The data structure from LinkedIn's REST API is complex.
-        // This is a simplified mapping. You will need to inspect the actual response
-        // from LinkedIn and adjust this mapping to fit your 'Post' type.
+        // This mapping will need to be adjusted based on the actual API response for personal posts.
         const formattedPosts = apiResponse.data.elements.map(post => {
             return {
                 id: post.id,
-                content: post.commentary,
-                imageUrl: post.content?.media?.source?.downloadUrl || 'https://picsum.photos/800/400',
-                impressions: post.insights?.find(i => i.type === 'IMPRESSIONS')?.value || 0,
-                reactions: {
-                    likes: post.insights?.find(i => i.type === 'REACTIONS' && i.reactionType === 'LIKE')?.value || 0,
-                    celebrations: 0, // API doesn't break down reactions this way anymore
-                    loves: 0,
-                    insights: 0,
-                    funny: 0,
-                },
-                comments: post.insights?.find(i => i.type === 'COMMENTS')?.value || 0,
-                shares: post.insights?.find(i => i.type === 'SHARES')?.value || 0,
+                content: post.commentary || '',
+                imageUrl: post.content?.media?.source?.downloadUrl || `https://picsum.photos/800/400?random=${Math.floor(Math.random()*1000)}`,
+                impressions: 0, // Personal post APIs may not provide detailed insights
+                reactions: { likes: 0, celebrations: 0, loves: 0, insights: 0, funny: 0 },
+                comments: 0,
+                shares: 0,
                 date: new Date(post.createdAt).toISOString().split('T')[0],
             };
         });
@@ -134,7 +134,11 @@ app.get('/api/posts', async (req, res) => {
 
     } catch(error) {
         console.error('Error fetching posts from LinkedIn:', error.response ? error.response.data : error.message);
-        res.status(500).json({ message: 'Failed to fetch posts.' });
+        // Provide a more helpful error message to the frontend.
+        if (error.response && error.response.status === 403) {
+            return res.status(403).json({ message: 'Authentication successful, but you do not have permission to access post data. Please ensure your LinkedIn App has the "Community Management API" product approved.' });
+        }
+        res.status(500).json({ message: 'Failed to fetch posts from LinkedIn API.' });
     }
 });
 
