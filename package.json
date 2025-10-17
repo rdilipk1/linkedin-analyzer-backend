@@ -1,8 +1,7 @@
-
 {
   "name": "linkedin-analyzer-backend",
   "version": "1.0.0",
-  "description": "Backend server for the LinkedIn Post Analyzer",
+  "description": "Backend server for the LinkedIn Post Analyzer application.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
