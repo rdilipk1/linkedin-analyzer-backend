@@ -82,7 +82,8 @@ app.get('/auth/linkedin/callback', async (req, res) => {
 
   if (!code) {
     console.error("Callback error: No authorization code received.");
-    return res.redirect(`${FRONTEND_URL}/settings?error=true`);
+    // Redirect to the ROOT of the frontend with an error parameter
+    return res.redirect(`${FRONTEND_URL}?error=true`);
   }
 
   try {
@@ -108,11 +109,12 @@ app.get('/auth/linkedin/callback', async (req, res) => {
     );
 
     console.log("Successfully retrieved and saved access token.");
-    res.redirect(`${FRONTEND_URL}/settings?connected=true`);
+    // Redirect to the ROOT of the frontend with a success parameter
+    res.redirect(`${FRONTEND_URL}?connected=true`);
 
   } catch (error) {
     console.error('Error during OAuth callback:', error.response ? error.response.data : error.message);
-    res.redirect(`${FRONTEND_URL}/settings?error=true`);
+    res.redirect(`${FRONTEND_URL}?error=true`);
   }
 });
 
